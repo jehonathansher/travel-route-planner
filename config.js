@@ -17,18 +17,18 @@
 // --- 1) Google Maps Platform key ------------------------------------------
 //  Google Cloud Console → APIs & Services → Credentials → API key.
 //  IMPORTANT: restrict it by HTTP referrer AND set quota caps (see README).
-export const GOOGLE_MAPS_API_KEY = "PASTE_YOUR_GOOGLE_MAPS_API_KEY_HERE";
+export const GOOGLE_MAPS_API_KEY = "AIzaSyCkUqVHCS0kQHAmz-r_nkrd_USehXxenWE";
 
 // --- 2) Firebase project config -------------------------------------------
 //  Firebase Console → Project settings → "Your apps" → SDK setup & config.
 //  Paste the values from the firebaseConfig object it shows you.
 export const FIREBASE_CONFIG = {
-  apiKey: "PASTE_FIREBASE_API_KEY",
-  authDomain: "PASTE_PROJECT_ID.firebaseapp.com",
-  projectId: "PASTE_PROJECT_ID",
-  storageBucket: "PASTE_PROJECT_ID.appspot.com",
-  messagingSenderId: "PASTE_SENDER_ID",
-  appId: "PASTE_APP_ID",
+  apiKey: "AIzaSyDGOwt7ZjKuCMb0QBhcAFuaFJ6qT4dQVWo",
+  authDomain: "travel-route-planner-30667.firebaseapp.com",
+  projectId: "travel-route-planner-30667",
+  storageBucket: "travel-route-planner-30667.firebasestorage.app",
+  messagingSenderId: "563241614147",
+  appId: "1:563241614147:web:ba936a479cf76cd02a8df6",
 };
 
 // --- 3) Map starting position ---------------------------------------------
