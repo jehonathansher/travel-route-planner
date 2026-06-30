@@ -266,6 +266,9 @@ html, body {
   background: var(--bg-2);
   padding: 24px;
 }
+/* The `hidden` attribute must win over the display:flex above (a class
+   selector otherwise overrides the browser's default [hidden]{display:none}). */
+.setup-overlay[hidden] { display: none; }
 .setup-card {
   background: #fff;
   border-radius: var(--radius);
