@@ -181,5 +181,7 @@ js/
 - **Phase 4:** transit scheduling — set a start time, see real arrival times, check whether the
   tube/bus is still running.
 
-See [`PLAN.md`](#) notes or the project plan for details and known limitations (e.g. transit
-coverage depends on the city; ferries are patchy).
+**Known limitations to expect in later phases:** transit routing/scheduling coverage depends on
+the city's data feed (London/TfL is excellent; rural areas may not be covered); "real schedules"
+means published timetables, not live delays; and ferries/boats are only routed where Google models
+them as transit (otherwise drawn as a straight line).
