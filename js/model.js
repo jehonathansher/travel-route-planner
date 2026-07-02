@@ -63,6 +63,13 @@ export function makeSegment({ start, end, mode = DEFAULT_MODE, color = "#4363d8"
       label: null,  // future: text label on the segment
     },
 
+    // Distance/time estimate from the routing engine (Phase 2). Populated once
+    // the real route is fetched; used to show "12 mins" etc. in the UI.
+    info: {
+      distance: null, // e.g. "3.9 km"
+      duration: null, // e.g. "56 mins"
+    },
+
     // Transit timing, filled in by Phase 4 for bus/tube/train/etc.
     schedule: {
       departureTime: null, // ISO string

@@ -159,6 +159,8 @@ html, body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.segment-row .seg-dur { flex: none; font-size: 12px; color: var(--muted); white-space: nowrap; }
+.segment-row .seg-dur.muted { opacity: 0.6; font-style: italic; }
 
 /* Trips drawer (slides in from the left) ----------------------------------- */
 .drawer {

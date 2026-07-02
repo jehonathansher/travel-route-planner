@@ -76,12 +76,20 @@ function renderSegments(trip) {
   el.segmentsList.innerHTML = "";
   segments.forEach((seg) => {
     const mode = TRAVEL_MODES[seg.mode] || {};
+    // Show the travel-time estimate once the real route is fetched; while it's
+    // still a straight line for a routable mode, show a subtle "routing…".
+    const dur = seg.info?.duration
+      ? `<span class="seg-dur">${escapeHtml(seg.info.duration)}</span>`
+      : (mode.routable && seg.routeSource === "straight"
+          ? `<span class="seg-dur muted">routing…</span>`
+          : "");
     const li = document.createElement("li");
     li.className = "segment-row";
     li.innerHTML = `
       <span class="dot" style="background:${seg.style.color}"></span>
       <span class="seg-mode">${mode.emoji || ""}</span>
       <span class="seg-text">${escapeHtml(seg.start.name)} → ${escapeHtml(seg.end.name)}</span>
+      ${dur}
       <button class="icon-btn small seg-del" aria-label="Delete segment">🗑</button>
     `;
     li.querySelector(".seg-del").addEventListener("click", async () => {

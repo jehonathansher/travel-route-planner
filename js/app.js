@@ -11,6 +11,7 @@ import { loadGoogleMaps } from "./gmaps-loader.js";
 import { initMap } from "./map.js";
 import { initStore } from "./store.js";
 import { initUI } from "./ui.js";
+import { initRouting } from "./routing.js";
 
 async function main() {
   if (isUnconfigured()) {
@@ -23,6 +24,7 @@ async function main() {
     initMap(document.getElementById("map"));
     initStore();   // begins real-time Firestore listeners
     initUI();      // binds buttons + subscribes to the store
+    initRouting(); // fills in the real route per segment (walk/drive/transit)
   } catch (err) {
     console.error(err);
     alert(err.message || "Something went wrong starting the app. See console.");
