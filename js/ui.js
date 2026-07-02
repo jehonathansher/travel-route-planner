@@ -1,50 +1,41 @@
 // ============================================================================
-//  UI  —  connects the buttons/panels in index.html to the store + map.
+//  UI  —  the itinerary (days + places) and the add/edit-place sheet.
 // ----------------------------------------------------------------------------
-//  The store is the single source of truth. We subscribe once (store.onChange)
-//  and re-draw whenever anything changes — so a change on your phone redraws
-//  here automatically, and vice-versa.
-//
-//  Adding legs is a "chain": each new leg starts where the last one ended, the
-//  sheet stays open, and departure time defaults to the previous leg's arrival.
+//  The store is the single source of truth; we subscribe once and redraw on any
+//  change (so edits on your phone show up here and vice-versa).
 // ============================================================================
 
-import { SEGMENT_COLORS } from "../config.js";
-import { TRAVEL_MODES, PICKER_MODES, DEFAULT_MODE } from "./model.js";
+import { MODES, DAY_COLORS, DEFAULT_MODE } from "./model.js";
 import { createPlaceInput } from "./places.js";
 import { renderTrip } from "./map.js";
-import { routeOne, computeTransitOptions, toDateTime, isoDate } from "./routing.js";
 import * as store from "./store.js";
 
 const $ = (id) => document.getElementById(id);
 const el = {
   tripName: $("trip-name"),
   btnTrips: $("btn-trips"),
-  btnAdd: $("btn-add"),
-  panel: $("segments-panel"),
-  segmentsHandle: $("segments-handle"),
-  segmentsSummary: $("segments-summary"),
-  segmentsList: $("segments-list"),
+  panel: $("itinerary"),
+  panelHandle: $("panel-handle"),
+  walkTotal: $("walk-total"),
+  days: $("days"),
+  btnAddDay: $("btn-add-day"),
   drawer: $("trips-drawer"),
   btnCloseTrips: $("btn-close-trips"),
   btnNewTrip: $("btn-new-trip"),
   tripsList: $("trips-list"),
   addSheet: $("add-sheet"),
   addTitle: $("add-title"),
+  editNote: $("edit-note"),
   btnCloseAdd: $("btn-close-add"),
-  tripDate: $("trip-date"),
-  depTime: $("dep-time"),
-  startChip: $("start-chip"),
-  startSlot: $("start-input"),
-  endSlot: $("end-input"),
-  modeChips: $("mode-chips"),
-  transitOptions: $("transit-options"),
-  btnSave: $("btn-save-segment"),
+  placeSlot: $("place-input"),
+  modeBlock: $("mode-block"),
+  modeToggle: $("mode-toggle"),
+  btnSavePlace: $("btn-save-place"),
   scrim: $("scrim"),
 };
 
-// What the add-leg form currently holds.
-let pending = { start: null, end: null, mode: DEFAULT_MODE, departureTime: "09:00" };
+// Context for the add/edit-place sheet.
+let addCtx = { dayId: null, editPlaceId: null, isFirst: false, place: null, mode: DEFAULT_MODE };
 
 export function initUI() {
   bindEvents();
@@ -52,74 +43,148 @@ export function initUI() {
 }
 
 // ---------------------------------------------------------------------------
-//  Rendering
+//  Render
 // ---------------------------------------------------------------------------
 function render(state) {
   const { trips, activeTrip } = state;
   el.tripName.textContent = activeTrip ? activeTrip.name : "＋ New trip";
   renderTrip(activeTrip);
-  renderSegments(activeTrip);
+  renderItinerary(activeTrip);
+  renderWalkTotal(activeTrip);
   renderTripsList(trips, state.activeTripId);
 }
 
-function renderSegments(trip) {
-  const segments = trip ? trip.segments : [];
-  el.segmentsSummary.textContent = segments.length
-    ? `${segments.length} leg${segments.length > 1 ? "s" : ""}`
-    : "No legs yet";
-
-  el.segmentsList.innerHTML = "";
-  segments.forEach((seg) => {
-    const mode = TRAVEL_MODES[seg.mode] || {};
-    const li = document.createElement("li");
-    li.className = "segment-row";
-    li.innerHTML = `
-      <span class="dot" style="background:${seg.style.color}"></span>
-      <div class="seg-main">
-        <div class="seg-text">${mode.emoji || ""} ${escapeHtml(seg.start.name)} → ${escapeHtml(seg.end.name)}</div>
-        <div class="seg-meta">${escapeHtml(segMeta(seg, mode))}</div>
-      </div>
-      <button class="icon-btn small seg-del" aria-label="Delete leg">🗑</button>
-    `;
-    li.querySelector(".seg-del").addEventListener("click", async () => {
-      if (confirm("Delete this leg?")) await store.removeSegment(trip.id, seg.id);
+function renderWalkTotal(trip) {
+  let km = 0, min = 0, places = 0;
+  (trip?.days || []).forEach((day) => {
+    if (day.visible === false) return;
+    day.places.forEach((p, i) => {
+      places++;
+      if (i > 0 && p.mode === "walk") {
+        km += p.info?.km || 0;
+        min += p.info?.minutes || 0;
+      }
     });
-    el.segmentsList.appendChild(li);
+  });
+  el.walkTotal.textContent = places
+    ? `🚶 ${km.toFixed(1)} km · ${min} min walking`
+    : "No places yet — tap a day to add one";
+}
+
+function renderItinerary(trip) {
+  el.days.innerHTML = "";
+  if (!trip) return;
+
+  trip.days.forEach((day) => {
+    const dayEl = document.createElement("div");
+    dayEl.className = "day";
+
+    // ---- Day header ----
+    const header = document.createElement("div");
+    header.className = "day-header";
+    const walkKm = day.places.reduce((a, p, i) => a + (i > 0 && p.mode === "walk" ? (p.info?.km || 0) : 0), 0);
+    header.innerHTML = `
+      <button class="day-color" style="background:${day.color}" aria-label="Change colour"></button>
+      <button class="day-name">${escapeHtml(day.name)}</button>
+      <span class="day-sub">${day.places.length} place${day.places.length === 1 ? "" : "s"}${walkKm ? ` · 🚶 ${walkKm.toFixed(1)} km` : ""}</span>
+      <button class="day-eye icon-btn small" aria-label="Show/hide">${day.visible === false ? "🙈" : "👁"}</button>
+      <button class="day-del icon-btn small" aria-label="Delete day">🗑</button>
+    `;
+    header.querySelector(".day-color").addEventListener("click", (e) => openColorPicker(trip.id, day, e.currentTarget));
+    header.querySelector(".day-name").addEventListener("click", async () => {
+      const name = prompt("Rename day:", day.name);
+      if (name && name.trim()) await store.updateDay(trip.id, day.id, { name: name.trim() });
+    });
+    header.querySelector(".day-eye").addEventListener("click", () =>
+      store.updateDay(trip.id, day.id, { visible: day.visible === false })
+    );
+    header.querySelector(".day-del").addEventListener("click", async () => {
+      if (confirm(`Delete "${day.name}" and its places?`)) await store.removeDay(trip.id, day.id);
+    });
+    dayEl.appendChild(header);
+
+    // ---- Places ----
+    const list = document.createElement("ul");
+    list.className = "places";
+    if (!day.places.length) {
+      const empty = document.createElement("li");
+      empty.className = "place-empty";
+      empty.textContent = "No places yet.";
+      list.appendChild(empty);
+    }
+    day.places.forEach((place, i) => list.appendChild(placeRow(trip.id, day, place, i)));
+    dayEl.appendChild(list);
+
+    // ---- Add place ----
+    const add = document.createElement("button");
+    add.className = "add-place-btn";
+    add.textContent = day.places.length ? "＋ Add next place" : "＋ Add starting place";
+    add.addEventListener("click", () => openAddSheet(trip.id, day.id));
+    dayEl.appendChild(add);
+
+    el.days.appendChild(dayEl);
   });
 }
 
-// The small grey line under each leg: times + summary/duration.
-function segMeta(seg, mode) {
-  const parts = [];
-  const dep = seg.schedule?.departureTime;
-  const arr = seg.schedule?.arrivalTime;
-  if (dep && arr) parts.push(`${dep} → ${arr}`);
-  else if (dep) parts.push(`dep ${dep}`);
+function placeRow(tripId, day, place, i) {
+  const mode = MODES[place.mode] || MODES.walk;
+  const li = document.createElement("li");
+  li.className = "place-row";
 
-  if (seg.schedule?.summary) parts.push(seg.schedule.summary);
-  else if (seg.info?.duration) parts.push(seg.info.duration);
-  else if (mode.routable && !mode.chooseOption && seg.routeSource === "straight") parts.push("routing…");
-  else if (!mode.routable) parts.push("straight line");
+  // Travel line (how you get here) — blank for the first place.
+  let travel = "";
+  if (i > 0) {
+    const time = place.info?.minutes != null ? `${place.info.minutes} min` : "…";
+    const dist = place.info?.km != null ? ` · ${place.info.km} km` : "";
+    travel = `<button class="place-travel" title="Tap to switch Walk / Transport">${mode.emoji} ${time}${dist}</button>`;
+  } else {
+    travel = `<span class="place-travel start">start</span>`;
+  }
 
-  return parts.join(" · ");
+  li.innerHTML = `
+    <span class="place-num" style="background:${day.color}">${i + 1}</span>
+    <div class="place-main">
+      <button class="place-name">${escapeHtml(place.name)}</button>
+      ${travel}
+    </div>
+    <div class="place-actions">
+      <button class="mv icon-btn small" data-dir="-1" aria-label="Move up" ${i === 0 ? "disabled" : ""}>▲</button>
+      <button class="mv icon-btn small" data-dir="1" aria-label="Move down" ${i === day.places.length - 1 ? "disabled" : ""}>▼</button>
+      <button class="del icon-btn small" aria-label="Delete place">🗑</button>
+    </div>
+  `;
+
+  li.querySelector(".place-name").addEventListener("click", () => openAddSheet(tripId, day.id, place, i));
+  const tBtn = li.querySelector(".place-travel");
+  if (i > 0 && tBtn) tBtn.addEventListener("click", () =>
+    store.updatePlace(tripId, day.id, place.id, { mode: place.mode === "walk" ? "transport" : "walk", routeKey: null })
+  );
+  li.querySelectorAll(".mv").forEach((b) =>
+    b.addEventListener("click", () => store.movePlace(tripId, day.id, place.id, Number(b.dataset.dir)))
+  );
+  li.querySelector(".del").addEventListener("click", async () => {
+    if (confirm(`Remove "${place.name}"?`)) await store.removePlace(tripId, day.id, place.id);
+  });
+  return li;
 }
 
 function renderTripsList(trips, activeTripId) {
   el.tripsList.innerHTML = "";
   if (!trips.length) {
-    const empty = document.createElement("li");
-    empty.className = "trips-empty";
-    empty.textContent = "No trips yet. Create your first one above.";
-    el.tripsList.appendChild(empty);
+    const li = document.createElement("li");
+    li.className = "trips-empty";
+    li.textContent = "No trips yet. Create your first one above.";
+    el.tripsList.appendChild(li);
     return;
   }
   trips.forEach((trip) => {
+    const placeCount = (trip.days || []).reduce((a, d) => a + d.places.length, 0);
     const li = document.createElement("li");
     li.className = "trip-row" + (trip.id === activeTripId ? " active" : "");
     li.innerHTML = `
       <button class="trip-pick">
         <span class="trip-row-name">${escapeHtml(trip.name)}</span>
-        <span class="trip-row-meta">${trip.segments.length} leg${trip.segments.length === 1 ? "" : "s"}${trip.date ? " · " + escapeHtml(trip.date) : ""}</span>
+        <span class="trip-row-meta">${trip.days.length} day${trip.days.length === 1 ? "" : "s"} · ${placeCount} place${placeCount === 1 ? "" : "s"}</span>
       </button>
       <button class="icon-btn small trip-del" aria-label="Delete trip">🗑</button>
     `;
@@ -128,16 +193,14 @@ function renderTripsList(trips, activeTripId) {
       closeAll();
     });
     li.querySelector(".trip-del").addEventListener("click", async () => {
-      if (confirm(`Delete trip "${trip.name}"? This cannot be undone.`)) {
-        await store.deleteTrip(trip.id);
-      }
+      if (confirm(`Delete trip "${trip.name}"? This cannot be undone.`)) await store.deleteTrip(trip.id);
     });
     el.tripsList.appendChild(li);
   });
 }
 
 // ---------------------------------------------------------------------------
-//  Event wiring
+//  Events
 // ---------------------------------------------------------------------------
 function bindEvents() {
   el.tripName.addEventListener("click", async () => {
@@ -146,284 +209,166 @@ function bindEvents() {
     const name = prompt("Rename trip:", active.name);
     if (name && name.trim()) await store.renameTrip(active.id, name);
   });
-
-  el.btnTrips.addEventListener("click", () => openDrawer());
+  el.btnTrips.addEventListener("click", () => { showScrim(); el.drawer.classList.add("open"); });
   el.btnCloseTrips.addEventListener("click", () => closeAll());
   el.btnNewTrip.addEventListener("click", () => newTripFlow());
-
-  el.btnAdd.addEventListener("click", () => openAddSheet());
-  el.btnCloseAdd.addEventListener("click", () => closeAll());
-  el.btnSave.addEventListener("click", () => handleAdd());
-
-  el.tripDate.addEventListener("change", async () => {
+  el.btnAddDay.addEventListener("click", async () => {
     const trip = store.getActiveTrip();
-    if (trip) await store.setTripDate(trip.id, el.tripDate.value);
-    clearTransitOptions();
+    if (trip) { await store.addDay(trip.id); el.panel.classList.remove("collapsed"); }
   });
-  el.depTime.addEventListener("change", () => {
-    pending.departureTime = el.depTime.value || pending.departureTime;
-    clearTransitOptions();
-  });
-
-  el.segmentsHandle.addEventListener("click", () => el.panel.classList.toggle("collapsed"));
+  el.btnCloseAdd.addEventListener("click", () => closeAll());
+  el.btnSavePlace.addEventListener("click", () => savePlace());
+  el.panelHandle.addEventListener("click", () => el.panel.classList.toggle("collapsed"));
   el.scrim.addEventListener("click", () => closeAll());
 }
 
-// ---------------------------------------------------------------------------
-//  Trip flows
-// ---------------------------------------------------------------------------
 async function newTripFlow() {
   const name = prompt("Name your trip:", "My trip");
   if (name === null) return;
   await store.createTrip(name);
   closeAll();
-}
-
-async function ensureActiveTrip() {
-  if (store.getActiveTrip()) return true;
-  const name = prompt("First, name your trip:", "My trip");
-  if (name === null) return false;
-  await store.createTrip(name);
-  return true;
+  el.panel.classList.remove("collapsed");
 }
 
 // ---------------------------------------------------------------------------
-//  Add-leg flow
+//  Add / edit a place
 // ---------------------------------------------------------------------------
-async function openAddSheet() {
-  if (!(await ensureActiveTrip())) return;
+async function openAddSheet(tripId, dayId, editPlace = null, index = null) {
   const trip = store.getActiveTrip();
-  const last = trip.segments[trip.segments.length - 1];
+  const day = trip?.days.find((d) => d.id === dayId);
+  const isFirst = editPlace ? index === 0 : (day && day.places.length === 0);
 
-  // Journey date (persist a default of today if unset).
-  el.tripDate.value = trip.date || isoDate(new Date());
-  if (!trip.date) await store.setTripDate(trip.id, el.tripDate.value);
-
-  pending = {
-    start: last ? last.end : null,
-    end: null,
-    mode: DEFAULT_MODE,
-    departureTime: last?.schedule?.arrivalTime || last?.schedule?.departureTime || "09:00",
+  addCtx = {
+    dayId,
+    editPlaceId: editPlace?.id || null,
+    isFirst,
+    place: null, // a NEW place picked from search (null = keep existing when editing)
+    mode: editPlace?.mode || DEFAULT_MODE,
   };
-  el.depTime.value = pending.departureTime;
 
-  buildModeChips();
-  clearTransitOptions();
-  await setupStartField(!!last);
-  await rebuildEndInput();
+  el.addTitle.textContent = editPlace ? "Change place" : (isFirst ? "Starting place" : "Add place");
+  el.editNote.hidden = !editPlace;
+  if (editPlace) el.editNote.textContent = `Now: ${editPlace.name} — search to move it, or just switch how you get there.`;
+
+  // The first place in a day has no "how do you get here".
+  el.modeBlock.hidden = isFirst;
+  if (!isFirst) buildModeToggle();
+
+  el.placeSlot.innerHTML = "";
+  await createPlaceInput(el.placeSlot, {
+    placeholder: editPlace ? editPlace.name : "Search a place",
+    onPick: (p) => { addCtx.place = p; updateSaveState(); },
+  });
+
   updateSaveState();
-
   showScrim();
   el.addSheet.classList.add("open");
 }
 
-// "From" is a fixed chip when chaining (tap to change), else a place search.
-async function setupStartField(chaining) {
-  el.startSlot.innerHTML = "";
-  if (chaining && pending.start) {
-    el.startChip.hidden = false;
-    el.startSlot.hidden = true;
-    el.startChip.innerHTML =
-      `<span class="from-chip-text">From: <strong>${escapeHtml(pending.start.name)}</strong></span>` +
-      `<button class="link-btn" id="change-start">change</button>`;
-    el.startChip.querySelector("#change-start").addEventListener("click", async () => {
-      pending.start = null;
-      updateSaveState();
-      el.startChip.hidden = true;
-      el.startSlot.hidden = false;
-      el.startSlot.innerHTML = "";
-      await createPlaceInput(el.startSlot, {
-        placeholder: "Start point",
-        onPick: (p) => { pending.start = p; updateSaveState(); },
-      });
+function buildModeToggle() {
+  el.modeToggle.innerHTML = "";
+  ["walk", "transport"].forEach((key) => {
+    const mode = MODES[key];
+    const btn = document.createElement("button");
+    btn.className = "chip" + (key === addCtx.mode ? " selected" : "");
+    btn.innerHTML = `${mode.emoji} ${mode.label}`;
+    btn.addEventListener("click", () => {
+      addCtx.mode = key;
+      [...el.modeToggle.children].forEach((c) => c.classList.remove("selected"));
+      btn.classList.add("selected");
     });
-  } else {
-    el.startChip.hidden = true;
-    el.startSlot.hidden = false;
-    await createPlaceInput(el.startSlot, {
-      placeholder: "Start point",
-      onPick: (p) => { pending.start = p; updateSaveState(); },
-    });
-  }
-}
-
-async function rebuildEndInput() {
-  el.endSlot.innerHTML = "";
-  await createPlaceInput(el.endSlot, {
-    placeholder: "End point",
-    onPick: (p) => { pending.end = p; updateSaveState(); },
-  });
-}
-
-function buildModeChips() {
-  el.modeChips.innerHTML = "";
-  PICKER_MODES.forEach((key) => {
-    const mode = TRAVEL_MODES[key];
-    const chip = document.createElement("button");
-    chip.className = "chip" + (key === pending.mode ? " selected" : "");
-    chip.innerHTML = `${mode.emoji} ${mode.label}`;
-    chip.addEventListener("click", () => {
-      pending.mode = key;
-      [...el.modeChips.children].forEach((c) => c.classList.remove("selected"));
-      chip.classList.add("selected");
-      clearTransitOptions();
-      updateSaveState();
-    });
-    el.modeChips.appendChild(chip);
+    el.modeToggle.appendChild(btn);
   });
 }
 
 function updateSaveState() {
-  const mode = TRAVEL_MODES[pending.mode];
-  el.btnSave.disabled = !(pending.start && pending.end);
-  el.btnSave.textContent = mode?.chooseOption ? "Find routes" : "Add leg";
+  // New place: need a search result. Editing: OK even without one (change mode only).
+  el.btnSavePlace.disabled = !(addCtx.place || addCtx.editPlaceId);
+  el.btnSavePlace.textContent = addCtx.editPlaceId ? "Save" : "Add place";
 }
 
-// The main action: public transport → show options; everything else → add now.
-async function handleAdd() {
+async function savePlace() {
   const trip = store.getActiveTrip();
-  if (!trip || !pending.start || !pending.end) return;
-  pending.departureTime = el.depTime.value || pending.departureTime;
+  if (!trip) return;
 
-  if (TRAVEL_MODES[pending.mode].chooseOption) await showTransitOptions();
-  else await addRoutedLeg();
-}
-
-async function showTransitOptions() {
-  const trip = store.getActiveTrip();
-  const depAt = toDateTime(el.tripDate.value, pending.departureTime);
-  setBusy("Finding routes…");
-  try {
-    const options = await computeTransitOptions(pending.start, pending.end, depAt);
-    renderTransitOptions(options);
-  } catch (err) {
-    el.transitOptions.hidden = false;
-    el.transitOptions.innerHTML =
-      `<div class="opt-empty">No public-transport route found for that time (${escapeHtml(err?.message || "error")}).</div>`;
-  } finally {
-    setBusy(null);
-  }
-}
-
-function renderTransitOptions(options) {
-  el.transitOptions.hidden = false;
-  if (!options.length) {
-    el.transitOptions.innerHTML = `<div class="opt-empty">No public-transport route found for that time.</div>`;
+  if (addCtx.editPlaceId) {
+    const patch = { mode: addCtx.isFirst ? undefined : addCtx.mode };
+    if (addCtx.place) Object.assign(patch, {
+      name: addCtx.place.name, placeId: addCtx.place.placeId,
+      lat: addCtx.place.lat, lng: addCtx.place.lng,
+    });
+    // Recompute the route for this place (its start/end/mode may have changed).
+    patch.routeKey = null;
+    // Drop undefined keys (Firestore rejects them).
+    Object.keys(patch).forEach((k) => patch[k] === undefined && delete patch[k]);
+    await store.updatePlace(trip.id, addCtx.dayId, addCtx.editPlaceId, patch);
+    closeAll();
     return;
   }
-  el.transitOptions.innerHTML = `<div class="opt-title">Choose a route</div>`;
-  options.forEach((opt) => {
-    const card = document.createElement("button");
-    card.className = "opt-card";
-    card.innerHTML = `
-      <div class="opt-row1">
-        <span class="opt-icons">${opt.icons}</span>
-        <span class="opt-dur">${escapeHtml(opt.durationText)}</span>
-      </div>
-      <div class="opt-row2">${escapeHtml(opt.departText)} → ${escapeHtml(opt.arriveText)} · ${escapeHtml(opt.summary)}</div>`;
-    card.addEventListener("click", () => addChosenOption(opt));
-    el.transitOptions.appendChild(card);
+
+  if (!addCtx.place) return;
+  await store.addPlace(trip.id, addCtx.dayId, {
+    name: addCtx.place.name, placeId: addCtx.place.placeId,
+    lat: addCtx.place.lat, lng: addCtx.place.lng,
+    mode: addCtx.isFirst ? DEFAULT_MODE : addCtx.mode,
   });
-}
 
-async function addRoutedLeg() {
-  const trip = store.getActiveTrip();
-  const color = nextColor(trip);
-  const mode = TRAVEL_MODES[pending.mode];
-  const depAt = toDateTime(el.tripDate.value, pending.departureTime);
-  setBusy("Adding leg…");
-  try {
-    let extra = { departureTime: pending.departureTime };
-    if (mode.routable) {
-      const routed = await routeOne(pending.start, pending.end, pending.mode, depAt);
-      extra = {
-        path: routed.path, routeSource: "directions", info: routed.info,
-        departureTime: routed.schedule.departureTime, arrivalTime: routed.schedule.arrivalTime,
-      };
-    }
-    await store.addSegment(trip.id, { start: pending.start, end: pending.end, mode: pending.mode, color, ...extra });
-    await chainNext(pending.end, extra.arrivalTime || null);
-  } catch (err) {
-    console.warn("Leg routing failed, adding straight line:", err?.message || err);
-    await store.addSegment(trip.id, {
-      start: pending.start, end: pending.end, mode: pending.mode, color, departureTime: pending.departureTime,
-    });
-    await chainNext(pending.end, null);
-  } finally {
-    setBusy(null);
-  }
-}
-
-async function addChosenOption(opt) {
-  const trip = store.getActiveTrip();
-  const color = nextColor(trip);
-  await store.addSegment(trip.id, {
-    start: pending.start, end: pending.end, mode: "transit", color,
-    path: opt.path, routeSource: "directions", info: opt.info,
-    departureTime: opt.schedule.departureTime, arrivalTime: opt.schedule.arrivalTime,
-    legs: opt.schedule.legs, summary: opt.schedule.summary,
+  // Chain: keep the sheet open, ready for the next place in this day.
+  addCtx.place = null;
+  addCtx.isFirst = false;
+  el.modeBlock.hidden = false;
+  buildModeToggle();
+  el.addTitle.textContent = "Add place";
+  el.editNote.hidden = true;
+  el.placeSlot.innerHTML = "";
+  await createPlaceInput(el.placeSlot, {
+    placeholder: "Search the next place",
+    onPick: (p) => { addCtx.place = p; updateSaveState(); },
   });
-  await chainNext(pending.end, opt.schedule.arrivalTime);
-}
-
-// Prepare the sheet for the next leg: start = previous end, time = its arrival.
-async function chainNext(newStart, arrival) {
-  pending.start = newStart;
-  pending.end = null;
-  pending.departureTime = arrival || pending.departureTime;
-  el.depTime.value = pending.departureTime;
-  clearTransitOptions();
-  await setupStartField(true);
-  await rebuildEndInput();
   updateSaveState();
-  el.panel.classList.remove("collapsed"); // reveal the growing list
-  flashTitle("Leg added ✓");
-}
-
-function nextColor(trip) {
-  return SEGMENT_COLORS[trip.segments.length % SEGMENT_COLORS.length];
+  el.panel.classList.remove("collapsed");
+  flashTitle("Added ✓");
 }
 
 // ---------------------------------------------------------------------------
-//  Small helpers
+//  Day colour picker (small popover)
 // ---------------------------------------------------------------------------
-function setBusy(text) {
-  if (text) {
-    el.btnSave.disabled = true;
-    el.btnSave.textContent = text;
-  } else {
-    updateSaveState();
-  }
+function openColorPicker(tripId, day, anchor) {
+  document.querySelectorAll(".color-pop").forEach((n) => n.remove());
+  const pop = document.createElement("div");
+  pop.className = "color-pop";
+  DAY_COLORS.forEach((color) => {
+    const b = document.createElement("button");
+    b.className = "color-dot" + (color === day.color ? " on" : "");
+    b.style.background = color;
+    b.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      await store.updateDay(tripId, day.id, { color });
+      pop.remove();
+    });
+    pop.appendChild(b);
+  });
+  anchor.parentElement.appendChild(pop);
+  setTimeout(() => document.addEventListener("click", function h() {
+    pop.remove(); document.removeEventListener("click", h);
+  }), 0);
 }
 
-function clearTransitOptions() {
-  el.transitOptions.hidden = true;
-  el.transitOptions.innerHTML = "";
-}
-
+// ---------------------------------------------------------------------------
+//  Helpers
+// ---------------------------------------------------------------------------
 let titleTimer;
 function flashTitle(msg) {
   el.addTitle.textContent = msg;
   clearTimeout(titleTimer);
-  titleTimer = setTimeout(() => { el.addTitle.textContent = "Add leg"; }, 1600);
+  titleTimer = setTimeout(() => { el.addTitle.textContent = "Add place"; }, 1400);
 }
-
-function openDrawer() {
-  showScrim();
-  el.drawer.classList.add("open");
-}
-
-function showScrim() {
-  el.scrim.classList.add("show");
-}
-
+function showScrim() { el.scrim.classList.add("show"); }
 function closeAll() {
   el.drawer.classList.remove("open");
   el.addSheet.classList.remove("open");
   el.scrim.classList.remove("show");
-  clearTransitOptions();
 }
-
 function escapeHtml(str) {
   return String(str).replace(/[&<>"']/g, (c) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",

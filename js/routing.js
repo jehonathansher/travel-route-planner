@@ -1,176 +1,83 @@
 // ============================================================================
-//  ROUTING (Phase 2 + scheduling)  —  real routes, times, and transit options.
+//  ROUTING  —  draw the real route to each place and estimate km + minutes.
 // ----------------------------------------------------------------------------
-//  • routeOne()            → the real route for one leg (walk/drive/transit),
-//                            plus arrival time given a departure time.
-//  • computeTransitOptions → several "Public transport" alternatives to choose
-//                            from, like Google Maps (Tube vs Bus vs …).
-//  • initRouting()         → auto-upgrades any leftover straight segments
-//                            (e.g. ones created before routing existed).
+//  Walk      → the real walking route (WALKING).
+//  Transport → the shortest road route (DRIVING), drawn translucent.
 //
-//  Note: google.maps.DirectionsService is "legacy" but still works and gets bug
-//  fixes; the eventual replacement is google.maps.routes.Route.computeRoutes.
+//  We watch the trip and (re)compute a place's route whenever its start, end,
+//  or mode changes — so editing a place or reordering places just works. Each
+//  place remembers a "routeKey" describing what its route was computed for; if
+//  that no longer matches, we recompute it.
 // ============================================================================
 
-import { TRAVEL_MODES } from "./model.js";
+import { MODES } from "./model.js";
 import * as store from "./store.js";
 
-const attempted = new Set(); // straight segments we've already auto-routed
+const inFlight = new Set(); // place ids currently being routed
 
-// ---- Auto-upgrade any straight segments left in the active trip ------------
 export function initRouting() {
   store.onChange(ensureRoutes);
 }
 
-async function ensureRoutes() {
+function ensureRoutes() {
   const trip = store.getActiveTrip();
   if (!trip) return;
 
-  for (const seg of trip.segments) {
-    if (seg.routeSource !== "straight") continue;      // already routed / manual
-    const mode = TRAVEL_MODES[seg.mode];
-    if (!mode || !mode.routable) continue;             // boat: keep straight
-    if (mode.chooseOption) continue;                   // public transport: you pick
-    if (attempted.has(seg.id)) continue;
+  for (const day of trip.days) {
+    day.places.forEach((place, i) => {
+      if (inFlight.has(place.id)) return;
 
-    attempted.add(seg.id);
-    try {
-      const dep = seg.schedule?.departureTime
-        ? toDateTime(trip.date, seg.schedule.departureTime) : null;
-      const routed = await routeOne(seg.start, seg.end, seg.mode, dep);
-      await store.updateSegment(trip.id, seg.id, {
-        path: routed.path,
-        routeSource: "directions",
-        info: routed.info,
-        schedule: { ...seg.schedule, arrivalTime: routed.schedule.arrivalTime },
-      });
-    } catch (err) {
-      console.warn(`Routing failed (${seg.mode}):`, err?.message || err);
-    }
+      // First place in a day has no route — make sure it's cleared.
+      if (i === 0) {
+        if (place.routeKey !== "FIRST" || (place.path && place.path.length)) {
+          inFlight.add(place.id);
+          store.updatePlace(trip.id, day.id, place.id, {
+            path: [], info: { km: null, minutes: null }, routeKey: "FIRST",
+          }).finally(() => inFlight.delete(place.id));
+        }
+        return;
+      }
+
+      const prev = day.places[i - 1];
+      const key = routeKey(prev, place, place.mode);
+      const upToDate = place.routeKey === key && place.path && place.path.length > 1;
+      if (upToDate) return;
+
+      inFlight.add(place.id);
+      computeLeg(prev, place, place.mode)
+        .then((result) =>
+          store.updatePlace(trip.id, day.id, place.id, {
+            path: result.path, info: result.info, routeKey: key,
+          })
+        )
+        .catch((err) => console.warn("Routing failed:", err?.message || err))
+        .finally(() => inFlight.delete(place.id));
+    });
   }
 }
 
-// ---- The real route for a single leg ---------------------------------------
-// Returns { path, routeSource, info:{distance,duration}, schedule:{departureTime,arrivalTime} }
-export async function routeOne(start, end, modeKey, departureDateTime) {
-  const mode = TRAVEL_MODES[modeKey];
-  const service = new google.maps.DirectionsService();
-
-  const request = {
-    origin: { lat: start.lat, lng: start.lng },
-    destination: { lat: end.lat, lng: end.lng },
-    travelMode: mode.google, // "WALKING" | "DRIVING" | "TRANSIT"
-  };
-  if (mode.google === "TRANSIT") {
-    const transitMode = mode.transit && google.maps.TransitMode[mode.transit];
-    request.transitOptions = {
-      departureTime: departureDateTime || new Date(),
-      ...(transitMode ? { modes: [transitMode] } : {}),
-    };
-  }
-
-  const response = await service.route(request);
-  const route = response.routes[0];
-  const leg = route.legs[0];
-  const path = route.overview_path.map((p) => ({ lat: p.lat(), lng: p.lng() }));
-
-  // Arrival = departure + travel time (for transit, use Google's actual times).
-  let arrivalTime = null;
-  if (leg.arrival_time?.value) {
-    arrivalTime = fmtTime(leg.arrival_time.value);
-  } else if (departureDateTime && leg.duration?.value != null) {
-    arrivalTime = fmtTime(new Date(departureDateTime.getTime() + leg.duration.value * 1000));
-  }
-
-  return {
-    path,
-    routeSource: "directions",
-    info: { distance: leg.distance?.text ?? null, duration: leg.duration?.text ?? null },
-    schedule: {
-      departureTime: departureDateTime ? fmtTime(departureDateTime) : null,
-      arrivalTime,
-    },
-  };
-}
-
-// ---- Public transport: several options to choose from ----------------------
-export async function computeTransitOptions(start, end, departureDateTime) {
+// Ask Google for the route between two places and its distance/time.
+async function computeLeg(prev, cur, modeKey) {
+  const mode = MODES[modeKey] || MODES.walk;
   const service = new google.maps.DirectionsService();
   const response = await service.route({
-    origin: { lat: start.lat, lng: start.lng },
-    destination: { lat: end.lat, lng: end.lng },
-    travelMode: "TRANSIT",
-    transitOptions: { departureTime: departureDateTime || new Date() },
-    provideRouteAlternatives: true,
+    origin: { lat: prev.lat, lng: prev.lng },
+    destination: { lat: cur.lat, lng: cur.lng },
+    travelMode: mode.google, // "WALKING" | "DRIVING"
   });
-  return response.routes.map((route) => optionFromRoute(route, departureDateTime));
-}
-
-function optionFromRoute(route, departureDateTime) {
+  const route = response.routes[0];
   const leg = route.legs[0];
-  const path = route.overview_path.map((p) => ({ lat: p.lat(), lng: p.lng() }));
-
-  // Pull out the transit steps (bus/tube/train segments) for a readable summary.
-  const transitSteps = (leg.steps || []).filter((s) => s.travel_mode === "TRANSIT" && s.transit);
-  const legs = transitSteps.map((s) => {
-    const line = s.transit.line || {};
-    return {
-      vehicle: line.vehicle?.name || line.vehicle?.type || "Transit",
-      icon: vehicleEmoji(line.vehicle?.type, line.vehicle?.name),
-      name: line.short_name || line.name || "",
-      from: s.transit.departure_stop?.name || "",
-      to: s.transit.arrival_stop?.name || "",
-      depart: s.transit.departure_time?.text || "",
-      arrive: s.transit.arrival_time?.text || "",
-    };
-  });
-
-  const icons = transitSteps.length
-    ? transitSteps.map((s) => vehicleEmoji(s.transit.line?.vehicle?.type, s.transit.line?.vehicle?.name)).join(" ")
-    : "🚶";
-  const summary = legs.map((l) => l.name || l.vehicle).filter(Boolean).join(" → ") || "Walk only";
-
-  const departDate = leg.departure_time?.value || departureDateTime || new Date();
-  const arriveDate = leg.arrival_time?.value || null;
-
   return {
-    path,
-    icons,
-    summary,
-    durationText: leg.duration?.text || "",
-    departText: fmtTime(departDate),
-    arriveText: arriveDate ? fmtTime(arriveDate) : "",
-    // Stored on the segment when this option is chosen:
-    schedule: {
-      departureTime: fmtTime(departDate),
-      arrivalTime: arriveDate ? fmtTime(arriveDate) : null,
-      legs,
-      summary,
+    path: route.overview_path.map((p) => ({ lat: p.lat(), lng: p.lng() })),
+    info: {
+      km: leg.distance ? Number((leg.distance.value / 1000).toFixed(1)) : null,
+      minutes: leg.duration ? Math.round(leg.duration.value / 60) : null,
     },
-    info: { distance: leg.distance?.text ?? null, duration: leg.duration?.text ?? null },
   };
 }
 
-function vehicleEmoji(type = "", name = "") {
-  const s = `${type} ${name}`.toLowerCase();
-  if (/subway|metro/.test(s)) return "🚇";
-  if (/bus/.test(s)) return "🚌";
-  if (/tram|light_rail|streetcar/.test(s)) return "🚊";
-  if (/ferry|boat/.test(s)) return "⛴️";
-  if (/train|rail|heavy/.test(s)) return "🚆";
-  return "🚉";
-}
-
-// ---- date/time helpers (shared with the UI) --------------------------------
-export function toDateTime(dateStr, timeStr) {
-  const now = new Date();
-  const [y, m, d] = (dateStr || isoDate(now)).split("-").map(Number);
-  const [hh, mm] = (timeStr || "09:00").split(":").map(Number);
-  return new Date(y, m - 1, d, hh, mm);
-}
-export function fmtTime(date) {
-  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
-}
-export function isoDate(date) {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+// A short fingerprint of "what this route was computed for".
+function routeKey(prev, cur, mode) {
+  const r = (n) => Number(n).toFixed(5);
+  return `${r(prev.lat)},${r(prev.lng)}>${r(cur.lat)},${r(cur.lng)}:${mode}`;
 }

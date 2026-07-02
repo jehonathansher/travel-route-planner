@@ -2,10 +2,8 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <!-- viewport-fit=cover + user-scalable=no keeps it feeling like an app on phones -->
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
-  <meta name="theme-color" content="#1f2937" />
-  <!-- Lets you "Add to Home Screen" and run full-screen like a native app -->
+  <meta name="theme-color" content="#111827" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -13,26 +11,26 @@
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <!-- The map fills the whole screen and is the primary interface -->
   <div id="map"></div>
 
-  <!-- Top bar: trips menu · active trip name · add segment -->
+  <!-- Top bar: trips menu · trip name -->
   <header id="topbar">
-    <button id="btn-trips" class="icon-btn" aria-label="Show trips">☰</button>
+    <button id="btn-trips" class="icon-btn" aria-label="Trips">☰</button>
     <button id="trip-name" class="trip-name" title="Tap to rename">Loading…</button>
-    <button id="btn-add" class="icon-btn" aria-label="Add segment">＋</button>
+    <span class="topbar-spacer"></span>
   </header>
 
-  <!-- Bottom panel: the active trip's segments (collapsible) -->
-  <section id="segments-panel" class="panel collapsed">
-    <button id="segments-handle" class="panel-handle">
-      <span id="segments-summary">No segments yet</span>
+  <!-- Itinerary: your days and the places in each -->
+  <section id="itinerary" class="panel collapsed">
+    <button id="panel-handle" class="panel-handle">
+      <span id="walk-total">No places yet</span>
       <span class="chevron">▲</span>
     </button>
-    <ul id="segments-list" class="segments-list"></ul>
+    <div id="days" class="days"></div>
+    <button id="btn-add-day" class="ghost-btn">＋ Add another day</button>
   </section>
 
-  <!-- Slide-out drawer: switch / create / delete trips (secondary navigation) -->
+  <!-- Slide-out drawer: switch / create / delete trips -->
   <aside id="trips-drawer" class="drawer">
     <div class="drawer-header">
       <h2>Trips</h2>
@@ -42,52 +40,29 @@
     <ul id="trips-list" class="trips-list"></ul>
   </aside>
 
-  <!-- Bottom sheet: add a leg (chains onto the previous one) -->
+  <!-- Bottom sheet: add or change a place -->
   <section id="add-sheet" class="sheet">
     <div class="sheet-header">
-      <h2 id="add-title">Add leg</h2>
+      <h2 id="add-title">Add place</h2>
       <button id="btn-close-add" class="icon-btn" aria-label="Close">✕</button>
     </div>
-
-    <div class="field-row">
-      <div class="field-col">
-        <label class="field-label" for="trip-date">Journey date</label>
-        <input type="date" id="trip-date" class="text-input" />
-      </div>
-      <div class="field-col">
-        <label class="field-label" for="dep-time">Departure</label>
-        <input type="time" id="dep-time" class="text-input" />
-      </div>
+    <div id="edit-note" class="edit-note" hidden></div>
+    <label class="field-label">Search a place</label>
+    <div id="place-input" class="place-slot"></div>
+    <div id="mode-block">
+      <label class="field-label">How do you get here?</label>
+      <div id="mode-toggle" class="mode-toggle"></div>
     </div>
-
-    <label class="field-label">From</label>
-    <!-- When chaining, "From" is fixed to the previous leg's end (a chip);
-         tap it to change. On the first leg it's a normal place search. -->
-    <div id="start-chip" class="from-chip" hidden></div>
-    <div id="start-input" class="place-slot"></div>
-
-    <label class="field-label">To</label>
-    <div id="end-input" class="place-slot"></div>
-
-    <label class="field-label">Travel mode</label>
-    <div id="mode-chips" class="mode-chips"></div>
-
-    <!-- Public-transport route options appear here to pick from -->
-    <div id="transit-options" class="transit-options" hidden></div>
-
-    <button id="btn-save-segment" class="primary-btn" disabled>Add leg</button>
+    <button id="btn-save-place" class="primary-btn" disabled>Add place</button>
   </section>
 
-  <!-- Dark backdrop shown behind the drawer / sheet -->
   <div id="scrim" class="scrim"></div>
 
-  <!-- Shown when config.js still has the placeholder values -->
   <div id="setup-overlay" class="setup-overlay" hidden>
     <div class="setup-card">
       <h1>Almost there 👋</h1>
       <p>Open <code>config.js</code> and paste in your <strong>Google Maps API key</strong>
-         and <strong>Firebase config</strong>, then refresh.</p>
-      <p>Step-by-step instructions are in the <strong>README</strong>.</p>
+         and <strong>Firebase config</strong>, then refresh. See the <strong>README</strong>.</p>
     </div>
   </div>
 

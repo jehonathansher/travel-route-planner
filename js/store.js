@@ -1,88 +1,58 @@
 // ============================================================================
-//  STORE  —  all reading/writing of trips, plus real-time sync.
+//  STORE  —  all reading/writing of trips (days + places), plus real-time sync.
 // ----------------------------------------------------------------------------
-//  This is the ONLY file that talks to Firestore for trip data. The rest of the
-//  app calls these functions and subscribes to onChange() for live updates.
-//
 //  Firestore layout:
-//     trips/{tripId}        →  { name, segments:[...], createdAt, updatedAt }
-//     app/state             →  { activeTripId }   (which trip is "active")
+//     trips/{tripId}   →  { name, days:[ {name,color,visible,places:[...]} ], ... }
+//     app/state        →  { activeTripId }
 //
-//  We keep "which trip is active" in a single tiny doc (app/state) instead of a
-//  flag on every trip — that means switching trips is one write and there is
-//  always exactly one active trip.
-//
-//  Real-time sync: two onSnapshot listeners keep an in-memory copy of all trips
-//  and the active-trip pointer. Any change (from this device OR your phone)
-//  fires the listeners, we update the cache, and notify the UI. That is what
-//  makes computer ↔ phone stay in sync automatically.
+//  Old trips (stored as a flat list of "segments") are migrated on read into
+//  the days/places shape, so nothing breaks.
 // ============================================================================
 
 import { db } from "./firebase.js";
-import { makeTrip, makeSegment } from "./model.js";
+import { makeTrip, makeDay, makePlace, migrateTrip, DAY_COLORS } from "./model.js";
 import {
   collection, doc, addDoc, setDoc, updateDoc, deleteDoc,
-  onSnapshot, serverTimestamp, getDoc,
+  onSnapshot, serverTimestamp, runTransaction,
 } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
 const tripsCol = collection(db, "trips");
 const stateDoc = doc(db, "app", "state");
 
-// ---- In-memory cache, kept fresh by the snapshot listeners ----------------
-const cache = {
-  trips: [],          // [{ id, name, segments, ... }]  newest first
-  activeTripId: null,
-};
-
-// ---- UI subscribers -------------------------------------------------------
+const cache = { trips: [], activeTripId: null };
 const listeners = new Set();
 
-// Subscribe to store changes. The callback is called immediately with the
-// current state, then again whenever anything changes. Returns an unsubscribe.
 export function onChange(cb) {
   listeners.add(cb);
   cb(getState());
   return () => listeners.delete(cb);
 }
-
 function notify() {
   const state = getState();
   listeners.forEach((cb) => cb(state));
 }
 
-// ---- Read helpers ---------------------------------------------------------
 export function getState() {
-  return {
-    trips: cache.trips,
-    activeTripId: cache.activeTripId,
-    activeTrip: getActiveTrip(),
-  };
+  return { trips: cache.trips, activeTripId: cache.activeTripId, activeTrip: getActiveTrip() };
 }
-
 export function getActiveTrip() {
   return cache.trips.find((t) => t.id === cache.activeTripId) || null;
 }
 
-// ---- Start listening (called once at startup) -----------------------------
 export function initStore() {
-  // Live list of all trips, newest-updated first.
   onSnapshot(tripsCol, (snap) => {
     cache.trips = snap.docs
-      .map((d) => ({ id: d.id, ...d.data() }))
+      .map((d) => migrateTrip({ id: d.id, ...d.data() }))
       .sort((a, b) => toMillis(b.updatedAt) - toMillis(a.updatedAt));
     notify();
   });
-
-  // Live pointer to the active trip.
   onSnapshot(stateDoc, (snap) => {
     cache.activeTripId = snap.exists() ? snap.data().activeTripId : null;
     notify();
   });
 }
 
-// ---- Mutations: trips -----------------------------------------------------
-
-// Create a trip and immediately make it the active one. Returns its id.
+// ---- Trips ----------------------------------------------------------------
 export async function createTrip(name) {
   const ref = await addDoc(tripsCol, {
     ...makeTrip({ name: name?.trim() || "New trip" }),
@@ -92,79 +62,90 @@ export async function createTrip(name) {
   await setActiveTrip(ref.id);
   return ref.id;
 }
-
 export async function renameTrip(tripId, name) {
-  await updateDoc(doc(db, "trips", tripId), {
-    name: name.trim() || "Untitled trip",
-    updatedAt: serverTimestamp(),
-  });
+  await updateDoc(doc(db, "trips", tripId), { name: name.trim() || "Untitled trip", updatedAt: serverTimestamp() });
 }
-
-// Set the journey date ("YYYY-MM-DD") for the whole trip.
-export async function setTripDate(tripId, date) {
-  await updateDoc(doc(db, "trips", tripId), {
-    date: date || null,
-    updatedAt: serverTimestamp(),
-  });
-}
-
 export async function deleteTrip(tripId) {
   await deleteDoc(doc(db, "trips", tripId));
-  // If we deleted the active trip, fall back to the most recent remaining one.
   if (cache.activeTripId === tripId) {
     const next = cache.trips.find((t) => t.id !== tripId);
     await setActiveTrip(next ? next.id : null);
   }
 }
-
 export async function setActiveTrip(tripId) {
   await setDoc(stateDoc, { activeTripId: tripId });
 }
 
-// ---- Mutations: segments --------------------------------------------------
-//  Segments live as an array inside the trip doc. To change one, we read the
-//  current array from the cache, modify it, and write the whole array back.
-//  (For a single user this is simple and reliable.)
-
-export async function addSegment(tripId, segmentInput) {
-  const trip = getTripById(tripId);
-  if (!trip) return;
-  const segment = makeSegment(segmentInput);
-  await writeSegments(tripId, [...trip.segments, segment]);
-  return segment.id;
+// ---- Days -----------------------------------------------------------------
+export async function addDay(tripId) {
+  const trip = getTrip(tripId);
+  const used = new Set((trip?.days || []).map((d) => d.color));
+  const color = DAY_COLORS.find((c) => !used.has(c)) || DAY_COLORS[(trip?.days?.length || 0) % DAY_COLORS.length];
+  const day = makeDay({ name: `Day ${(trip?.days?.length || 0) + 1}`, color });
+  await mutateDays(tripId, (days) => [...days, day]);
+  return day.id;
 }
-
-export async function updateSegment(tripId, segmentId, patch) {
-  const trip = getTripById(tripId);
-  if (!trip) return;
-  const segments = trip.segments.map((s) =>
-    s.id === segmentId ? { ...s, ...patch } : s
-  );
-  await writeSegments(tripId, segments);
+export async function updateDay(tripId, dayId, patch) {
+  await mutateDays(tripId, (days) => days.map((d) => (d.id === dayId ? { ...d, ...patch } : d)));
 }
-
-export async function removeSegment(tripId, segmentId) {
-  const trip = getTripById(tripId);
-  if (!trip) return;
-  await writeSegments(tripId, trip.segments.filter((s) => s.id !== segmentId));
-}
-
-// ---- internals ------------------------------------------------------------
-function getTripById(tripId) {
-  return cache.trips.find((t) => t.id === tripId) || null;
-}
-
-async function writeSegments(tripId, segments) {
-  await updateDoc(doc(db, "trips", tripId), {
-    segments,
-    updatedAt: serverTimestamp(),
+export async function removeDay(tripId, dayId) {
+  await mutateDays(tripId, (days) => {
+    const left = days.filter((d) => d.id !== dayId);
+    return left.length ? left : [makeDay({ name: "Day 1", color: DAY_COLORS[0] })]; // never zero days
   });
 }
 
-// Firestore timestamps -> milliseconds (handles the brief moment before the
-// server timestamp resolves, when the field may still be null).
+// ---- Places (within a day) ------------------------------------------------
+export async function addPlace(tripId, dayId, placeInput) {
+  const place = makePlace(placeInput);
+  await mutateDays(tripId, (days) => mapDayPlaces(days, dayId, (ps) => [...ps, place]));
+  return place.id;
+}
+export async function updatePlace(tripId, dayId, placeId, patch) {
+  await mutateDays(tripId, (days) =>
+    mapDayPlaces(days, dayId, (ps) => ps.map((p) => (p.id === placeId ? { ...p, ...patch } : p)))
+  );
+}
+export async function removePlace(tripId, dayId, placeId) {
+  await mutateDays(tripId, (days) => mapDayPlaces(days, dayId, (ps) => ps.filter((p) => p.id !== placeId)));
+}
+// Move a place up (-1) or down (+1) within its day.
+export async function movePlace(tripId, dayId, placeId, direction) {
+  await mutateDays(tripId, (days) => mapDayPlaces(days, dayId, (ps) => {
+    const i = ps.findIndex((p) => p.id === placeId);
+    const j = i + direction;
+    if (i < 0 || j < 0 || j >= ps.length) return ps;
+    const copy = ps.slice();
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+    return copy;
+  }));
+}
+
+// ---- internals ------------------------------------------------------------
+function getTrip(tripId) {
+  return cache.trips.find((t) => t.id === tripId) || null;
+}
+function mapDayPlaces(days, dayId, fn) {
+  return days.map((d) => (d.id === dayId ? { ...d, places: fn(d.places) } : d));
+}
+
+// Read-modify-write the trip's `days` array ATOMICALLY. Because reordering a
+// place and auto-computing its route can happen at nearly the same time, a
+// plain "read cache → write whole array" can clobber. A transaction reads the
+// current server value inside the write, so concurrent edits can't stomp each
+// other (Firestore retries on conflict).
+async function mutateDays(tripId, fn) {
+  const ref = doc(db, "trips", tripId);
+  await runTransaction(db, async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists()) return;
+    const data = snap.data();
+    const days = data.days ? data.days : migrateTrip({ ...data }).days;
+    const newDays = fn(days);
+    if (!newDays) return;
+    tx.update(ref, { days: newDays, updatedAt: serverTimestamp() });
+  });
+}
 function toMillis(ts) {
-  if (!ts) return 0;
-  if (typeof ts.toMillis === "function") return ts.toMillis();
-  return 0;
+  return ts && typeof ts.toMillis === "function" ? ts.toMillis() : 0;
 }

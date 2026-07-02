@@ -1,111 +1,99 @@
 // ============================================================================
-//  DATA MODEL  —  the shape of a Trip and a Segment, in one place.
+//  DATA MODEL  —  a Trip is made of Days; a Day is an ordered list of Places.
 // ----------------------------------------------------------------------------
-//  Everything that defines "what a trip/segment is" lives here so the schema is
-//  easy to find and extend. The factory functions below set sensible defaults,
-//  including fields we are NOT using yet (line thickness, dash style, labels,
-//  transit schedule) so they can be filled in later WITHOUT changing how data
-//  is stored.  See README "Data model".
+//  Trip
+//    └─ days[]
+//         └─ Day { name, color, visible, places[] }
+//              └─ Place { name, lat, lng, mode, path, info }
+//
+//  "mode" on a place is how you travel to it FROM THE PREVIOUS PLACE:
+//     "walk"      → the real walking route (solid line)
+//     "transport" → the shortest road route (translucent line)
+//  The first place in a day has no route (nothing before it).
 // ============================================================================
 
-// All supported travel modes and their metadata.
-//   • google   : the travelMode passed to the Google Directions service (Phase 2)
-//   • transit  : for TRANSIT modes, the specific vehicle type (Phase 2/4)
-//   • routable : false = there is no road/transit route, so we draw a straight
-//                line (e.g. boat/ferry where Google has no data)
-export const TRAVEL_MODES = {
-  walk:    { label: "Walk",             emoji: "🚶", google: "WALKING", routable: true },
-  // "Public transport" = let Google pick the best mix of bus/tube/train/etc.
-  // and offer alternatives to choose from (chooseOption = show a picker).
-  transit: { label: "Public transport", emoji: "🚆", google: "TRANSIT", routable: true, chooseOption: true },
-  car:     { label: "Car",              emoji: "🚗", google: "DRIVING", routable: true },
-  taxi:    { label: "Taxi",             emoji: "🚕", google: "DRIVING", routable: true },
-  boat:    { label: "Boat",             emoji: "⛴️", google: "TRANSIT", transit: "FERRY", routable: false },
-  // Kept so older segments (created before "Public transport") still render:
-  train:   { label: "Train", emoji: "🚆", google: "TRANSIT", transit: "TRAIN",  routable: true },
-  bus:     { label: "Bus",   emoji: "🚌", google: "TRANSIT", transit: "BUS",    routable: true },
-  tube:    { label: "Tube",  emoji: "🚇", google: "TRANSIT", transit: "SUBWAY", routable: true },
+// The only two ways to travel between places.
+export const MODES = {
+  walk:      { label: "Walk",      emoji: "🚶", google: "WALKING" },
+  transport: { label: "Transport", emoji: "🚌", google: "DRIVING", translucent: true },
 };
-
-// The modes shown as choices when adding a leg (a curated subset of the above).
-export const PICKER_MODES = ["walk", "transit", "car", "taxi", "boat"];
-
 export const DEFAULT_MODE = "walk";
 
-// A "place" picked from Google Places search.
-export function makePlace({ placeId = null, name = "", lat, lng }) {
-  return { placeId, name, lat, lng };
-}
+// Colours a day's routes are drawn in. New days pick the next unused one.
+export const DAY_COLORS = [
+  "#2563eb", // blue
+  "#dc2626", // red
+  "#16a34a", // green
+  "#d97706", // amber
+  "#7c3aed", // purple
+  "#0891b2", // teal
+  "#db2777", // pink
+  "#4b5563", // grey
+];
 
-// Create a fresh segment between two places.
-//  start / end : objects from makePlace()
-//  mode        : a key of TRAVEL_MODES
-//  color       : hex string (assigned by the caller from the palette)
-export function makeSegment({
-  start, end, mode = DEFAULT_MODE, color = "#4363d8",
-  // Optional overrides — used when we already have a real route (e.g. a chosen
-  // public-transport option) so we don't start from a straight line.
-  path = null, routeSource = "straight",
-  departureTime = null, arrivalTime = null, legs = [], summary = null,
-  info = null,
-}) {
+// A place you visit. `mode` = how you got here from the previous place.
+export function makePlace({ name = "", placeId = null, lat, lng, mode = DEFAULT_MODE }) {
   return {
     id: crypto.randomUUID(),
+    name,
+    placeId,
+    lat,
+    lng,
     mode,
-    start,
-    end,
-
-    // The drawn line as an explicit list of {lat,lng} points.
-    //   • 2 points       = straight line (v1 default)
-    //   • many points    = a real route from Google (Phase 2)
-    //   • hand-edited     = your custom dragged path (Phase 3)
-    // Storing every kind of line as the same "path" array means the renderer
-    // and the storage never need to change as we add routing/dragging.
-    path: path && path.length > 1 ? path : straightPath(start, end),
-    // Where "path" came from: "straight" | "directions" | "manual".
-    routeSource,
-
-    // Visual style. Only "color" is used in v1. weight/dash/label are reserved
-    // so they can be added later without restructuring stored data.
-    style: {
-      color,
-      weight: null, // future: line thickness
-      dash: null,   // future: "solid" | "dashed"
-      label: null,  // future: text label on the segment
-    },
-
-    // Distance/time estimate from the routing engine (Phase 2). Populated once
-    // the real route is fetched; used to show "12 mins" etc. in the UI.
-    info: info || {
-      distance: null, // e.g. "3.9 km"
-      duration: null, // e.g. "56 mins"
-    },
-
-    // When this leg departs/arrives (Phase 4 scheduling). Times are "HH:MM"
-    // strings, interpreted on the trip's date.
-    schedule: {
-      departureTime,       // "HH:MM" you want to leave
-      arrivalTime,         // "HH:MM" you'll arrive (computed)
-      legs,                // transit legs: [{ vehicle, line, from, to, depart, arrive }]
-      summary,             // e.g. "Victoria line → Bakerloo line"
-    },
+    // The route from the previous place to here (filled in by routing.js).
+    path: [],
+    // Rough estimate for that route.
+    info: { km: null, minutes: null },
+    // Lets routing know when the route is stale (start/end/mode changed).
+    routeKey: null,
   };
 }
 
-// Create a fresh, empty trip. `date` is the day of the journey ("YYYY-MM-DD").
-export function makeTrip({ name, date = null }) {
+// A day: an ordered list of places, with its own colour + show/hide.
+export function makeDay({ name, color }) {
+  return {
+    id: crypto.randomUUID(),
+    name: name || "Day 1",
+    color: color || DAY_COLORS[0],
+    visible: true,
+    places: [],
+  };
+}
+
+// A fresh trip always starts with one empty day.
+export function makeTrip({ name }) {
   return {
     name,
-    date,
-    segments: [],
+    days: [makeDay({ name: "Day 1", color: DAY_COLORS[0] })],
     // createdAt / updatedAt are added by the store using Firestore timestamps.
   };
 }
 
-// Convenience: the straight 2-point path between two places.
-export function straightPath(start, end) {
-  return [
-    { lat: start.lat, lng: start.lng },
-    { lat: end.lat, lng: end.lng },
-  ];
+// ---------------------------------------------------------------------------
+//  Migration: turn an OLD trip (flat list of segments) into the days/places
+//  shape, so trips created before this redesign keep working.
+// ---------------------------------------------------------------------------
+export function migrateTrip(data) {
+  if (data.days) return data; // already new shape
+  const segments = data.segments || [];
+
+  const places = [];
+  if (segments.length) {
+    // First place = the very first segment's start (no route to it).
+    const s0 = segments[0].start;
+    places.push(makePlace({ name: s0.name, placeId: s0.placeId, lat: s0.lat, lng: s0.lng }));
+    // Each segment's end becomes the next place, keeping its route + mode.
+    for (const seg of segments) {
+      const p = makePlace({
+        name: seg.end.name, placeId: seg.end.placeId, lat: seg.end.lat, lng: seg.end.lng,
+        mode: seg.mode === "walk" ? "walk" : "transport",
+      });
+      if (Array.isArray(seg.path) && seg.path.length > 1) p.path = seg.path;
+      places.push(p);
+    }
+  }
+
+  const day = makeDay({ name: "Day 1", color: DAY_COLORS[0] });
+  day.places = places;
+  return { ...data, days: [day] };
 }

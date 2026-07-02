@@ -1,28 +1,27 @@
 // ============================================================================
-//  MAP  —  create the Google Map and draw the active trip on it.
+//  MAP  —  create the Google Map and draw the trip's visible days.
 // ----------------------------------------------------------------------------
-//  Phase 1 draws each segment as a coloured polyline along its stored `path`
-//  (a straight 2-point line for now) plus a small marker at each end. Phase 2
-//  will fill `path` with real routes and Phase 3 will make walking lines
-//  editable — but because everything draws from `segment.path`, this renderer
-//  barely changes.
+//  For each visible day we draw:
+//    • a numbered marker at every place (in the day's colour)
+//    • the route to each place — a solid line for Walk, a thicker translucent
+//      line for Transport (the shortest road route).
+//  Hidden days are skipped.
 // ============================================================================
 
 import { DEFAULT_CENTER, DEFAULT_ZOOM } from "../config.js";
+import { MODES } from "./model.js";
 
 let map = null;
-let overlays = []; // every polyline/marker we've drawn, so we can clear them
+let overlays = [];
 
-// Create the map inside the given element.
 export function initMap(element) {
   map = new google.maps.Map(element, {
     center: DEFAULT_CENTER,
     zoom: DEFAULT_ZOOM,
-    disableDefaultUI: true, // we provide our own touch-friendly controls
+    disableDefaultUI: true,
     zoomControl: true,
-    gestureHandling: "greedy", // one finger pans the map (no two-finger gesture)
+    gestureHandling: "greedy",
     clickableIcons: false,
-    mapId: undefined,
   });
   return map;
 }
@@ -31,52 +30,54 @@ export function getMap() {
   return map;
 }
 
-// Remove everything we've drawn.
 function clearOverlays() {
   overlays.forEach((o) => o.setMap(null));
   overlays = [];
 }
 
-// Draw a whole trip: all its segments.
 export function renderTrip(trip) {
   clearOverlays();
-  if (!trip || !trip.segments.length) return;
+  if (!trip) return;
 
   const bounds = new google.maps.LatLngBounds();
+  let hasPoints = false;
 
-  trip.segments.forEach((seg) => {
-    // The coloured line.
-    const line = new google.maps.Polyline({
-      path: seg.path,
-      strokeColor: seg.style.color,
-      strokeOpacity: 1,
-      strokeWeight: seg.style.weight || 4, // weight is reserved; default 4 for v1
-      map,
-    });
-    overlays.push(line);
+  for (const day of trip.days) {
+    if (day.visible === false) continue;
 
-    // Small markers at the two ends so endpoints are easy to see.
-    [seg.start, seg.end].forEach((p) => {
-      const marker = new google.maps.Marker({
-        position: { lat: p.lat, lng: p.lng },
+    day.places.forEach((place, i) => {
+      // Route line to this place (skip the first place — nothing before it).
+      if (i > 0 && place.path && place.path.length > 1) {
+        const mode = MODES[place.mode] || MODES.walk;
+        overlays.push(new google.maps.Polyline({
+          path: place.path,
+          strokeColor: day.color,
+          strokeOpacity: mode.translucent ? 0.35 : 1,
+          strokeWeight: mode.translucent ? 8 : 4,
+          map,
+        }));
+      }
+
+      // Numbered marker for the place.
+      overlays.push(new google.maps.Marker({
+        position: { lat: place.lat, lng: place.lng },
         map,
-        // Classic Marker is deprecated but works everywhere and needs no Map ID.
-        // Swap for AdvancedMarkerElement later if desired.
+        title: place.name,
+        label: { text: String(i + 1), color: "#fff", fontSize: "12px", fontWeight: "700" },
         icon: {
           path: google.maps.SymbolPath.CIRCLE,
-          scale: 5,
-          fillColor: seg.style.color,
+          scale: 11,
+          fillColor: day.color,
           fillOpacity: 1,
           strokeColor: "#ffffff",
           strokeWeight: 2,
         },
-      });
-      overlays.push(marker);
+      }));
+
+      bounds.extend({ lat: place.lat, lng: place.lng });
+      hasPoints = true;
     });
+  }
 
-    seg.path.forEach((pt) => bounds.extend(pt));
-  });
-
-  // Frame the whole trip nicely.
-  if (!bounds.isEmpty()) map.fitBounds(bounds, 60);
+  if (hasPoints) map.fitBounds(bounds, 70);
 }
