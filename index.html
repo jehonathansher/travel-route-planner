@@ -42,19 +42,40 @@
     <ul id="trips-list" class="trips-list"></ul>
   </aside>
 
-  <!-- Bottom sheet: add a new segment -->
+  <!-- Bottom sheet: add a leg (chains onto the previous one) -->
   <section id="add-sheet" class="sheet">
     <div class="sheet-header">
-      <h2>Add segment</h2>
+      <h2 id="add-title">Add leg</h2>
       <button id="btn-close-add" class="icon-btn" aria-label="Close">✕</button>
     </div>
+
+    <div class="field-row">
+      <div class="field-col">
+        <label class="field-label" for="trip-date">Journey date</label>
+        <input type="date" id="trip-date" class="text-input" />
+      </div>
+      <div class="field-col">
+        <label class="field-label" for="dep-time">Departure</label>
+        <input type="time" id="dep-time" class="text-input" />
+      </div>
+    </div>
+
     <label class="field-label">From</label>
+    <!-- When chaining, "From" is fixed to the previous leg's end (a chip);
+         tap it to change. On the first leg it's a normal place search. -->
+    <div id="start-chip" class="from-chip" hidden></div>
     <div id="start-input" class="place-slot"></div>
+
     <label class="field-label">To</label>
     <div id="end-input" class="place-slot"></div>
+
     <label class="field-label">Travel mode</label>
     <div id="mode-chips" class="mode-chips"></div>
-    <button id="btn-save-segment" class="primary-btn" disabled>Add segment</button>
+
+    <!-- Public-transport route options appear here to pick from -->
+    <div id="transit-options" class="transit-options" hidden></div>
+
+    <button id="btn-save-segment" class="primary-btn" disabled>Add leg</button>
   </section>
 
   <!-- Dark backdrop shown behind the drawer / sheet -->

@@ -144,23 +144,27 @@ html, body {
 .segments-list { list-style: none; margin: 0; padding: 0 8px 12px; overflow-y: auto; }
 .segment-row {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 10px;
   padding: 10px 8px;
   border-top: 1px solid var(--border);
 }
-.segment-row .dot { width: 12px; height: 12px; border-radius: 50%; flex: none; }
-.segment-row .seg-mode { font-size: 18px; flex: none; }
+.segment-row .dot { width: 12px; height: 12px; border-radius: 50%; flex: none; margin-top: 3px; }
+.segment-row .seg-main { flex: 1; min-width: 0; }
 .segment-row .seg-text {
-  flex: 1;
-  min-width: 0;
   font-size: 14px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.segment-row .seg-dur { flex: none; font-size: 12px; color: var(--muted); white-space: nowrap; }
-.segment-row .seg-dur.muted { opacity: 0.6; font-style: italic; }
+.segment-row .seg-meta {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 2px;
+}
 
 /* Trips drawer (slides in from the left) ----------------------------------- */
 .drawer {
@@ -237,6 +241,62 @@ html, body {
 }
 /* The Google place-search web component fills the slot width */
 .place-slot gmp-place-autocomplete { width: 100%; }
+
+/* Date / time inputs, laid out side by side */
+.field-row { display: flex; gap: 12px; }
+.field-col { flex: 1; min-width: 0; }
+.text-input {
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 10px;
+  font-size: 15px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+  color: var(--text);
+}
+
+/* "From: X  [change]" chip shown when chaining onto the previous leg */
+.from-chip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 11px 12px;
+  background: #f3f4f6;
+  border-radius: 10px;
+}
+.from-chip-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+.link-btn {
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  flex: none;
+}
+
+/* Public-transport route options */
+.transit-options { margin-bottom: 14px; }
+.opt-title { font-size: 13px; font-weight: 600; color: var(--muted); margin: 4px 0 8px; }
+.opt-card {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fff;
+  padding: 12px;
+  margin-bottom: 8px;
+  cursor: pointer;
+}
+.opt-card:active { background: #f9fafb; }
+.opt-row1 { display: flex; align-items: center; justify-content: space-between; }
+.opt-icons { font-size: 18px; }
+.opt-dur { font-size: 15px; font-weight: 700; }
+.opt-row2 { font-size: 13px; color: var(--muted); margin-top: 4px; }
+.opt-empty { font-size: 14px; color: var(--muted); padding: 6px 2px; }
 
 /* Mode chips ---------------------------------------------------------------- */
 .mode-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }

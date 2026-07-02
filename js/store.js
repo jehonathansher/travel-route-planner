@@ -100,6 +100,14 @@ export async function renameTrip(tripId, name) {
   });
 }
 
+// Set the journey date ("YYYY-MM-DD") for the whole trip.
+export async function setTripDate(tripId, date) {
+  await updateDoc(doc(db, "trips", tripId), {
+    date: date || null,
+    updatedAt: serverTimestamp(),
+  });
+}
+
 export async function deleteTrip(tripId) {
   await deleteDoc(doc(db, "trips", tripId));
   // If we deleted the active trip, fall back to the most recent remaining one.

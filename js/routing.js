@@ -1,99 +1,176 @@
 // ============================================================================
-//  ROUTING (Phase 2)  —  turn each segment's straight line into the REAL route.
+//  ROUTING (Phase 2 + scheduling)  —  real routes, times, and transit options.
 // ----------------------------------------------------------------------------
-//  For every segment whose line is still a straight "as the crow flies" line,
-//  we ask Google for the actual route for that travel mode (walking path,
-//  driving roads, or the real bus/tube/train route) and save it back into the
-//  segment's `path`. Because the result is stored, we only call Google once per
-//  segment (cheap + fast on later loads).
+//  • routeOne()            → the real route for one leg (walk/drive/transit),
+//                            plus arrival time given a departure time.
+//  • computeTransitOptions → several "Public transport" alternatives to choose
+//                            from, like Google Maps (Tube vs Bus vs …).
+//  • initRouting()         → auto-upgrades any leftover straight segments
+//                            (e.g. ones created before routing existed).
 //
-//  Note: google.maps.DirectionsService is marked "legacy" by Google but still
-//  fully works and receives bug fixes. If it's ever discontinued, the drop-in
-//  replacement is google.maps.routes.Route.computeRoutes (see migration guide).
+//  Note: google.maps.DirectionsService is "legacy" but still works and gets bug
+//  fixes; the eventual replacement is google.maps.routes.Route.computeRoutes.
 // ============================================================================
 
 import { TRAVEL_MODES } from "./model.js";
 import * as store from "./store.js";
 
-// Segment ids we've already tried this session, so we never double-request
-// (or spin forever on a mode/time that has no route).
-const attempted = new Set();
+const attempted = new Set(); // straight segments we've already auto-routed
 
-// Start watching the store; whenever trips change, fill in any missing routes.
+// ---- Auto-upgrade any straight segments left in the active trip ------------
 export function initRouting() {
   store.onChange(ensureRoutes);
 }
 
-function ensureRoutes() {
+async function ensureRoutes() {
   const trip = store.getActiveTrip();
   if (!trip) return;
 
   for (const seg of trip.segments) {
-    // Only segments that are still a plain straight line need routing.
-    // ("directions" = already routed, "manual" = you hand-drew it in Phase 3.)
-    if (seg.routeSource !== "straight") continue;
-
+    if (seg.routeSource !== "straight") continue;      // already routed / manual
     const mode = TRAVEL_MODES[seg.mode];
-    if (!mode || !mode.routable) continue; // e.g. boat: keep the straight line
+    if (!mode || !mode.routable) continue;             // boat: keep straight
+    if (mode.chooseOption) continue;                   // public transport: you pick
     if (attempted.has(seg.id)) continue;
 
     attempted.add(seg.id);
-    routeSegment(trip.id, seg); // fire-and-forget; updates the store when done
-  }
-}
-
-async function routeSegment(tripId, seg) {
-  try {
-    const result = await computeRoute(seg);
-    if (result && result.path.length > 1) {
-      await store.updateSegment(tripId, seg.id, {
-        path: result.path,
+    try {
+      const dep = seg.schedule?.departureTime
+        ? toDateTime(trip.date, seg.schedule.departureTime) : null;
+      const routed = await routeOne(seg.start, seg.end, seg.mode, dep);
+      await store.updateSegment(trip.id, seg.id, {
+        path: routed.path,
         routeSource: "directions",
-        info: result.info,
+        info: routed.info,
+        schedule: { ...seg.schedule, arrivalTime: routed.schedule.arrivalTime },
       });
+    } catch (err) {
+      console.warn(`Routing failed (${seg.mode}):`, err?.message || err);
     }
-  } catch (err) {
-    // No route (e.g. tube not running at this time, or no transit data here).
-    // Leave the straight line in place; we simply won't retry it this session.
-    console.warn(`Routing failed for "${seg.start.name} → ${seg.end.name}" (${seg.mode}):`, err?.message || err);
   }
 }
 
-// Ask Google for the real route and return { path:[{lat,lng}], info:{...} }.
-function computeRoute(seg) {
-  const mode = TRAVEL_MODES[seg.mode];
+// ---- The real route for a single leg ---------------------------------------
+// Returns { path, routeSource, info:{distance,duration}, schedule:{departureTime,arrivalTime} }
+export async function routeOne(start, end, modeKey, departureDateTime) {
+  const mode = TRAVEL_MODES[modeKey];
   const service = new google.maps.DirectionsService();
 
   const request = {
-    origin: { lat: seg.start.lat, lng: seg.start.lng },
-    destination: { lat: seg.end.lat, lng: seg.end.lng },
+    origin: { lat: start.lat, lng: start.lng },
+    destination: { lat: end.lat, lng: end.lng },
     travelMode: mode.google, // "WALKING" | "DRIVING" | "TRANSIT"
   };
-
-  // For bus/tube/train, ask for that specific kind of transit, leaving now.
-  // (Phase 4 will let you change the departure time.)
   if (mode.google === "TRANSIT") {
     const transitMode = mode.transit && google.maps.TransitMode[mode.transit];
     request.transitOptions = {
-      departureTime: new Date(),
+      departureTime: departureDateTime || new Date(),
       ...(transitMode ? { modes: [transitMode] } : {}),
     };
   }
 
-  return service.route(request).then((response) => {
-    const route = response.routes[0];
-    if (!route) return null;
+  const response = await service.route(request);
+  const route = response.routes[0];
+  const leg = route.legs[0];
+  const path = route.overview_path.map((p) => ({ lat: p.lat(), lng: p.lng() }));
 
-    // overview_path is the full route as a list of points, following the real
-    // roads / rails / walking paths (not a straight line).
-    const path = route.overview_path.map((p) => ({ lat: p.lat(), lng: p.lng() }));
+  // Arrival = departure + travel time (for transit, use Google's actual times).
+  let arrivalTime = null;
+  if (leg.arrival_time?.value) {
+    arrivalTime = fmtTime(leg.arrival_time.value);
+  } else if (departureDateTime && leg.duration?.value != null) {
+    arrivalTime = fmtTime(new Date(departureDateTime.getTime() + leg.duration.value * 1000));
+  }
 
-    // Sum distance/time across legs for a quick "how long" estimate.
-    const legs = route.legs || [];
-    const info = {
-      distance: legs[0]?.distance?.text ?? null,
-      duration: legs[0]?.duration?.text ?? null,
-    };
-    return { path, info };
+  return {
+    path,
+    routeSource: "directions",
+    info: { distance: leg.distance?.text ?? null, duration: leg.duration?.text ?? null },
+    schedule: {
+      departureTime: departureDateTime ? fmtTime(departureDateTime) : null,
+      arrivalTime,
+    },
+  };
+}
+
+// ---- Public transport: several options to choose from ----------------------
+export async function computeTransitOptions(start, end, departureDateTime) {
+  const service = new google.maps.DirectionsService();
+  const response = await service.route({
+    origin: { lat: start.lat, lng: start.lng },
+    destination: { lat: end.lat, lng: end.lng },
+    travelMode: "TRANSIT",
+    transitOptions: { departureTime: departureDateTime || new Date() },
+    provideRouteAlternatives: true,
   });
+  return response.routes.map((route) => optionFromRoute(route, departureDateTime));
+}
+
+function optionFromRoute(route, departureDateTime) {
+  const leg = route.legs[0];
+  const path = route.overview_path.map((p) => ({ lat: p.lat(), lng: p.lng() }));
+
+  // Pull out the transit steps (bus/tube/train segments) for a readable summary.
+  const transitSteps = (leg.steps || []).filter((s) => s.travel_mode === "TRANSIT" && s.transit);
+  const legs = transitSteps.map((s) => {
+    const line = s.transit.line || {};
+    return {
+      vehicle: line.vehicle?.name || line.vehicle?.type || "Transit",
+      icon: vehicleEmoji(line.vehicle?.type, line.vehicle?.name),
+      name: line.short_name || line.name || "",
+      from: s.transit.departure_stop?.name || "",
+      to: s.transit.arrival_stop?.name || "",
+      depart: s.transit.departure_time?.text || "",
+      arrive: s.transit.arrival_time?.text || "",
+    };
+  });
+
+  const icons = transitSteps.length
+    ? transitSteps.map((s) => vehicleEmoji(s.transit.line?.vehicle?.type, s.transit.line?.vehicle?.name)).join(" ")
+    : "🚶";
+  const summary = legs.map((l) => l.name || l.vehicle).filter(Boolean).join(" → ") || "Walk only";
+
+  const departDate = leg.departure_time?.value || departureDateTime || new Date();
+  const arriveDate = leg.arrival_time?.value || null;
+
+  return {
+    path,
+    icons,
+    summary,
+    durationText: leg.duration?.text || "",
+    departText: fmtTime(departDate),
+    arriveText: arriveDate ? fmtTime(arriveDate) : "",
+    // Stored on the segment when this option is chosen:
+    schedule: {
+      departureTime: fmtTime(departDate),
+      arrivalTime: arriveDate ? fmtTime(arriveDate) : null,
+      legs,
+      summary,
+    },
+    info: { distance: leg.distance?.text ?? null, duration: leg.duration?.text ?? null },
+  };
+}
+
+function vehicleEmoji(type = "", name = "") {
+  const s = `${type} ${name}`.toLowerCase();
+  if (/subway|metro/.test(s)) return "🚇";
+  if (/bus/.test(s)) return "🚌";
+  if (/tram|light_rail|streetcar/.test(s)) return "🚊";
+  if (/ferry|boat/.test(s)) return "⛴️";
+  if (/train|rail|heavy/.test(s)) return "🚆";
+  return "🚉";
+}
+
+// ---- date/time helpers (shared with the UI) --------------------------------
+export function toDateTime(dateStr, timeStr) {
+  const now = new Date();
+  const [y, m, d] = (dateStr || isoDate(now)).split("-").map(Number);
+  const [hh, mm] = (timeStr || "09:00").split(":").map(Number);
+  return new Date(y, m - 1, d, hh, mm);
+}
+export function fmtTime(date) {
+  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+export function isoDate(date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
