@@ -36,6 +36,12 @@ html, body {
 #map {
   position: fixed;
   inset: 0;
+  width: 100%;
+  /* Google Maps sets the container to position:relative once it initializes,
+     which cancels the inset:0 sizing — so give it an explicit viewport height.
+     dvh keeps it correct on mobile as the browser URL bar shows/hides. */
+  height: 100vh;
+  height: 100dvh;
   background: #e5e7eb;
 }
 
